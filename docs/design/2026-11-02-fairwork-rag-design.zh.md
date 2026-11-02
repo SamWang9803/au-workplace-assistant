@@ -2,8 +2,9 @@
 
 日期：2026-11-02 · 状态：已在对话中拍板，待实现
 
-修订 2026-11-02：embedding 从 OpenAI 的 `text-embedding-3-small` 改为 Gemini 的
-`gemini-embedding-2`；整个项目只用一个服务商、一把 key。
+修订 2026-11-02：对话从 Gemini 改为 OpenAI 的 `gpt-4.1-mini`，整条流水线只用一个
+服务商、一把 key。原因：Gemini 免费档在这个项目上每天只允许 20 次对话请求，而评测
+跑一轮要 33 次。
 
 英文原版：`2026-11-02-fairwork-rag-design.md`（两份内容有出入时以英文版为准）
 
@@ -55,24 +56,20 @@
 PDF ──入库(ingest)──▶ chunks（text、embedding、tsvector）存入 PostgreSQL
 问题 ──embed──▶ 向量检索 top-20 ─┐
 问题 ──websearch_to_tsquery──▶ 全文检索 top-20 ─┴─ RRF ──▶ top-5 chunks
-top-5 + 问题 ──prompt──▶ Gemini（JSON）──校验引用 / 拒答──▶ 回答
+top-5 + 问题 ──prompt──▶ 对话模型（JSON）──校验引用 / 拒答──▶ 回答
 每次 /ask ──▶ queries 表（token 数、费用、延迟）
 ```
 
-所有模型调用都走 `openai` SDK，指向 Gemini 的 OpenAI 兼容端点
-`https://generativelanguage.googleapis.com/v1beta/openai/`（环境变量 `GEMINI_BASE_URL`），
-只用一把 key `GEMINI_API_KEY`：
+所有模型调用都走同一个 `openai` 客户端，用 `OPENAI_API_KEY`：
 
 | 用途 | 模型（默认值，可用环境变量覆盖） |
 |---|---|
-| 对话与评判（judge） | `gemini-2.5-flash`，temperature 0，`response_format` 为 json_object |
-| 向量嵌入 | `gemini-embedding-2`，传 `dimensions=1536`：模型按 Matryoshka 方式训练，服务端把 3072 维输出截到 1536 维并归一化后返回。用 1536 是为了保住 `vector(1536)` 列和它的 HNSW 索引（pgvector 对 `vector` 类型最多索引 2000 维）。2026-11-02 已对真实端点实测通过 |
+| 对话与评判（judge） | `gpt-4.1-mini`，temperature 0，严格的 `json_schema` 响应格式。没选 `gpt-5` 系列，是因为那些模型只接受默认 temperature，而评测需要确定性的回答 |
+| 向量嵌入 | `text-embedding-3-small`，1536 维 |
 
-两个模型在 Gemini 免费档都不收费。对话大约每分钟只允许 5 到 10 次请求，所以对话
-客户端强制两次调用之间留最小间隔（默认 7 秒，环境变量 `CHAT_MIN_INTERVAL_S`）；
-对话和 embedding 调用遇到 429/5xx 都按指数退避重试三次。embedding 的限额按项目计，
-在 AI Studio 里查看；每批 32 个分块，远低于外界报出的每分钟 3 万 token 免费上限。
-免费档的输入 Google 可能用于改进产品；语料是公开文档，README 里会写明。
+两者都已于 2026-11-02 对真实 API 实测通过。OpenAI 用量等级 1（首次充 5 美元即解锁）
+每分钟允许几百次请求，远超本项目所需，所以不做节流；调用遇到 429/5xx 按指数退避
+重试三次。API 数据默认不用于训练。
 
 ## 4. 组件
 
@@ -80,11 +77,11 @@ top-5 + 问题 ──prompt──▶ Gemini（JSON）──校验引用 / 拒答
 
 | 模块 | 职责 | 接口 |
 |---|---|---|
-| `rag/settings.py` | 读 `.env`：`GEMINI_API_KEY`、`GEMINI_BASE_URL`、模型名、`DATABASE_URL`、分块大小、`RAG_MIN_SIMILARITY`、价格表 | `settings` 对象 |
-| `rag/providers.py` | 一个指向 Gemini 端点的 `openai` 客户端，带限流和重试。`embed` 传 `dimensions=1536`。对话返回真实 token 用量；端点不返回 embedding 的用量，所以 `embed` 按字符数 / 4 估算 | `embed(texts) -> list[list[float]], usage` · `chat_json(system, user) -> dict, usage, latency_ms` |
+| `rag/settings.py` | 读 `.env`：`OPENAI_API_KEY`、模型名、`DATABASE_URL`、分块大小、`RAG_MIN_SIMILARITY`、价格表 | `settings` 对象 |
+| `rag/providers.py` | 一个 `openai` 客户端，带重试；每次调用都返回 token 用量 | `embed(texts) -> list[list[float]], usage` · `chat_json(system, user, schema) -> dict, usage, latency_ms` |
 | `rag/chunking.py` | 把一页文本切成约 1800 字符、重叠 200 字符的块，尽量在段落或句子边界断开 | `chunk_page(text) -> list[str]`（纯函数） |
 | `rag/db.py` | 连接、建表、写入，以及两种检索查询 | `init_schema()`、`upsert_document()`、`insert_chunks()`、`vector_search()`、`text_search()`、`log_query()` |
-| `rag/ingest.py` | 用 pypdf 逐页读 PDF，分块，按每批 32 条做嵌入，存库。读不了的文件打警告跳过。重跑会替换该文档的全部分块 | `python -m rag.ingest [data/raw]` |
+| `rag/ingest.py` | 用 pypdf 逐页读 PDF，分块，按每批 64 条做嵌入，存库。读不了的文件打警告跳过。重跑会替换该文档的全部分块 | `python -m rag.ingest [data/raw]` |
 | `rag/retrieve.py` | 把问题做嵌入，跑两种检索，用 reciprocal rank fusion（k = 60）合并，返回 top-5 分块和最高余弦相似度 | `retrieve(question) -> Retrieval(chunks, best_similarity)` · `rrf_merge(lists) -> ranked`（纯函数） |
 | `rag/answer.py` | 拼带编号来源的 prompt，调对话模型，校验 JSON，套用拒答规则 | `answer(question) -> Answer(text, citations, refused, usage, cost_usd, latency_ms)` · `validate_citations()`（纯函数） |
 | `rag/eval.py` | 跑黄金测试集，算指标，写结果表 | `python -m rag.eval` |
@@ -134,7 +131,7 @@ CREATE TABLE queries (
 
 ## 6. 检索
 
-1. 把问题做嵌入（一次 Gemini embedding 调用，`dimensions=1536`）。
+1. 把问题做嵌入（一次 OpenAI 调用）。
 2. 向量检索：`ORDER BY embedding <=> $q LIMIT 20`，余弦相似度按 `1 - distance`
    返回。
 3. 全文检索：`WHERE tsv @@ websearch_to_tsquery('english', $q)`，按 `ts_rank_cd`
@@ -150,8 +147,9 @@ CREATE TABLE queries (
 ## 7. 回答与拒答
 
 系统提示词：只根据带编号的来源作答，数字原样引用，按编号标注引用，返回 JSON
-`{"answer": str, "citations": [int], "confidence": "high"|"medium"|"low"}`。
-来源里没有答案时，返回空的 `citations` 列表并明说。
+`{"answer": str, "citations": [int], "confidence": "high"|"medium"|"low"}`，
+由严格的 `json_schema` 响应格式保证结构。来源里没有答案时，返回空的 `citations`
+列表并明说。
 
 满足以下任一条件就拒答（回复「The documents I have do not cover this.」）：
 
@@ -160,7 +158,8 @@ CREATE TABLE queries (
 - JSON 解析失败，且用更严格的指令重试一次后仍失败（这条响应同时在日志里标
   `error=true`）。
 
-不在 `1..5` 范围内的引用编号会被丢弃；一个都不剩就拒答。保留下来的每条引用，
+相似度检查在调用模型之前进行，所以跑题问题不花对话 token。不在 `1..5` 范围内的
+引用编号会被丢弃；一个都不剩就拒答。保留下来的每条引用，
 以文档名、页码和分块文本的形式返回。
 
 ## 8. API
@@ -201,25 +200,23 @@ CREATE TABLE queries (
 |---|---|---|
 | hit@5 | `expected_doc` 在检出的五个分块所属文档之中 | ≥ 80% |
 | cited hit | `expected_doc` 在被引用分块所属文档之中 | 只报告 |
-| faithfulness | 由 Gemini 当评判（judge），对照检出来源和标准答案给回答打 1–5 分 | 平均 ≥ 4 |
+| faithfulness | 由 LLM 当评判（judge，同一个对话模型），对照检出来源和标准答案给回答打 1–5 分 | 平均 ≥ 4 |
 | refusal rate | 跑题问题中被拒答的比例 | 3 / 3 |
 | latency | 每个问题的平均和 p95 毫秒数 | 只报告 |
 | cost | 按标价算的每个问题平均美元费用 | 只报告 |
 
 结果以表格形式写到 `evals/results/<UTC 时间戳>.md`；README 引用最近一次的结果。
-评判用的 prompt 放在 `rag/eval.py` 里，评判模型走同一个对话客户端（因此也受同样
-的限流）。
+评判用的 prompt 放在 `rag/eval.py` 里，评判模型走同一个对话客户端。
 
 ## 10. 费用核算
 
 价格表放在 settings 里，单位是每百万 token 的美元数，注明是近似值、可覆盖：
-Gemini Embedding 2 为 0.20；Gemini 2.5 Flash 输入 0.30、输出 2.50。embedding 的
-token 数按字符数 / 4 估算，因为端点不返回 embedding 的用量。免费档不收费，所以
-README 同时写明按标价算的数字和实际花费为零。
+嵌入 0.02；gpt-4.1-mini 输入 0.40、输出 1.60。按这个价，评测跑一轮约 0.06 美元。
+README 写明按标价算的每题费用，以及从 OpenAI 用量面板抄录的实际总花费。
 
 ## 11. 错误处理
 
-- 模型服务 429/5xx（对话和 embedding）：重试三次，退避 2 秒、4 秒、8 秒；之后调用失败，由调用方报告
+- 模型服务 429/5xx：重试三次，退避 2 秒、4 秒、8 秒；之后调用失败，由调用方报告
   （评测标记该行，API 返回 502）。
 - PDF 读不了或页面为空：打警告跳过，继续。
 - 模型返回的 JSON：解析、校验结构、重试一次，仍不行就拒答并标 `error=true`。
@@ -254,8 +251,8 @@ au-workplace-assistant/
   docs/design/
 ```
 
-配置项（`.env`）：`GEMINI_API_KEY`、`GEMINI_BASE_URL`、`CHAT_MODEL`、`EMBED_MODEL`、
-`DATABASE_URL`、`RAG_MIN_SIMILARITY`、`CHAT_MIN_INTERVAL_S`。
+配置项（`.env`）：`OPENAI_API_KEY`、`CHAT_MODEL`、`EMBED_MODEL`、`DATABASE_URL`、
+`RAG_MIN_SIMILARITY`。
 
 ## 14. 第二阶段的接口
 

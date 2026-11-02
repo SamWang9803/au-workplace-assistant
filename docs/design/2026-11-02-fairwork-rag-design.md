@@ -2,8 +2,9 @@
 
 Date: 2026-11-02 · Status: approved in conversation, pending implementation
 
-Revision 2026-11-02: embeddings moved from OpenAI `text-embedding-3-small` to
-Gemini `gemini-embedding-2`; the project now uses a single provider and key.
+Revision 2026-11-02: chat moved from Gemini to OpenAI `gpt-4.1-mini`, so the
+whole pipeline runs on one provider and one key. Reason: the Gemini free tier
+on this project allows 20 chat requests per day, and one eval run needs 33.
 
 ## 1. Goal
 
@@ -56,27 +57,21 @@ visible and testable.
 PDFs ──ingest──▶ chunks (text, embedding, tsvector) in PostgreSQL
 question ──embed──▶ vector top-20 ─┐
 question ──websearch_to_tsquery──▶ full-text top-20 ─┴─ RRF ──▶ top-5 chunks
-top-5 + question ──prompt──▶ Gemini (JSON) ──validate citations / refuse──▶ answer
+top-5 + question ──prompt──▶ chat model (JSON) ──validate citations / refuse──▶ answer
 every /ask ──▶ queries table (tokens, cost, latency)
 ```
 
-All model access goes through the `openai` SDK pointed at Gemini's
-OpenAI-compatible endpoint `https://generativelanguage.googleapis.com/v1beta/openai/`
-(env `GEMINI_BASE_URL`), with the single key `GEMINI_API_KEY`:
+All model access goes through one `openai` client with `OPENAI_API_KEY`:
 
 | Use | Model (default, env-overridable) |
 |---|---|
-| Chat and judge | `gemini-2.5-flash`, temperature 0, `response_format` json_object |
-| Embeddings | `gemini-embedding-2` with `dimensions=1536`: the model is Matryoshka-trained, so the server truncates its 3072-dim output to 1536 and returns it normalised. 1536 keeps the `vector(1536)` column and its HNSW index (pgvector indexes `vector` up to 2000 dims). Verified against the live endpoint on 2026-11-02 |
+| Chat and judge | `gpt-4.1-mini`, temperature 0, strict `json_schema` response format. Chosen over the `gpt-5` family because those models reject any temperature other than the default, and the eval wants deterministic answers |
+| Embeddings | `text-embedding-3-small`, 1536 dimensions |
 
-Both models are free of charge on the Gemini free tier. The chat limit is
-roughly 5 to 10 requests per minute, so the chat client enforces a minimum
-interval between calls (default 7 s, env `CHAT_MIN_INTERVAL_S`); both chat and
-embedding calls retry 429/5xx three times with exponential backoff. Embedding
-limits are per project and shown in AI Studio; batches of 32 chunks keep each
-request well under the reported 30k tokens-per-minute free limit. The free
-tier may use inputs to improve Google's products; the corpus is public and the
-README says so.
+Both verified against the live API on 2026-11-02. OpenAI usage tier 1 (unlocked
+by the first USD 5) allows hundreds of requests per minute, far above this
+project's needs, so there is no pacing; calls retry 429/5xx three times with
+exponential backoff. API data is not used for training by default.
 
 ## 4. Components
 
@@ -84,11 +79,11 @@ One module, one job. Pure functions where possible so tests need no network.
 
 | Module | Responsibility | Interface |
 |---|---|---|
-| `rag/settings.py` | Load `.env`: `GEMINI_API_KEY`, `GEMINI_BASE_URL`, model names, `DATABASE_URL`, chunk sizes, `RAG_MIN_SIMILARITY`, price table | `settings` object |
-| `rag/providers.py` | One `openai` client against the Gemini endpoint, with rate limiting and retries. `embed` passes `dimensions=1536`. Chat returns real token usage; the endpoint returns none for embeddings, so `embed` estimates tokens as characters / 4 | `embed(texts) -> list[list[float]], usage` · `chat_json(system, user) -> dict, usage, latency_ms` |
+| `rag/settings.py` | Load `.env`: `OPENAI_API_KEY`, model names, `DATABASE_URL`, chunk sizes, `RAG_MIN_SIMILARITY`, price table | `settings` object |
+| `rag/providers.py` | One `openai` client with retries; token usage returned with every call | `embed(texts) -> list[list[float]], usage` · `chat_json(system, user, schema) -> dict, usage, latency_ms` |
 | `rag/chunking.py` | Split page text into chunks of ~1800 characters with 200 overlap, breaking at paragraph or sentence boundaries when possible | `chunk_page(text) -> list[str]` (pure) |
 | `rag/db.py` | Connection, schema creation, inserts and the two search queries | `init_schema()`, `upsert_document()`, `insert_chunks()`, `vector_search()`, `text_search()`, `log_query()` |
-| `rag/ingest.py` | Read PDFs with pypdf page by page, chunk, embed in batches of 32, store. Skips unreadable files with a warning. Re-running replaces a document's chunks | `python -m rag.ingest [data/raw]` |
+| `rag/ingest.py` | Read PDFs with pypdf page by page, chunk, embed in batches of 64, store. Skips unreadable files with a warning. Re-running replaces a document's chunks | `python -m rag.ingest [data/raw]` |
 | `rag/retrieve.py` | Embed the question, run both searches, merge with reciprocal rank fusion (k = 60), return top-5 chunks plus the best cosine similarity | `retrieve(question) -> Retrieval(chunks, best_similarity)` · `rrf_merge(lists) -> ranked` (pure) |
 | `rag/answer.py` | Build the numbered-sources prompt, call chat, validate the JSON, apply refusal rules | `answer(question) -> Answer(text, citations, refused, usage, cost_usd, latency_ms)` · `validate_citations()` (pure) |
 | `rag/eval.py` | Run the golden set, compute metrics, write the results table | `python -m rag.eval` |
@@ -138,7 +133,7 @@ so it never collides with another local PostgreSQL on 5432.
 
 ## 6. Retrieval
 
-1. Embed the question (one Gemini embedding call, `dimensions=1536`).
+1. Embed the question (one OpenAI call).
 2. Vector search: `ORDER BY embedding <=> $q LIMIT 20`, returning cosine
    similarity as `1 - distance`.
 3. Full-text search: `WHERE tsv @@ websearch_to_tsquery('english', $q)` ordered
@@ -158,8 +153,9 @@ those, and RRF needs no weight tuning.
 
 System prompt: answer only from the numbered sources, quote figures exactly,
 cite by number, and return JSON `{"answer": str, "citations": [int],
-"confidence": "high"|"medium"|"low"}`. If the sources do not contain the answer,
-return an empty `citations` list and say so.
+"confidence": "high"|"medium"|"low"}`; a strict `json_schema` response format
+enforces that shape. If the sources do not contain the answer, return an empty
+`citations` list and say so.
 
 Refuse (reply "The documents I have do not cover this.") when any of:
 
@@ -168,7 +164,9 @@ Refuse (reply "The documents I have do not cover this.") when any of:
 - the JSON cannot be parsed after one retry with a stricter instruction (the
   response is also flagged `error=true` in the log).
 
-Citations outside `1..5` are dropped; if none remain, the answer is refused.
+The similarity check runs before the model is called, so off-topic questions
+cost no chat tokens. Citations outside `1..5` are dropped; if none remain, the
+answer is refused.
 Each kept citation is returned as document name, page and the chunk text.
 
 ## 8. API
@@ -210,26 +208,25 @@ runs each question through `retrieve` and `answer` and reports:
 |---|---|---|
 | hit@5 | `expected_doc` is among the documents of the five retrieved chunks | ≥ 80% |
 | cited hit | `expected_doc` is among the cited chunks' documents | reported |
-| faithfulness | Gemini judge scores the answer 1–5 against the retrieved sources and the gold answer | mean ≥ 4 |
+| faithfulness | LLM judge (same chat model) scores the answer 1–5 against the retrieved sources and the gold answer | mean ≥ 4 |
 | refusal rate | share of off-topic questions refused | 3 of 3 |
 | latency | mean and p95 ms per question | reported |
 | cost | mean USD per question at list price | reported |
 
 Results go to `evals/results/<UTC timestamp>.md` as a table; the README quotes
 the latest run. The judge prompt lives in `rag/eval.py` and the judge uses the
-same chat client (and therefore the same rate limiting).
+same chat client.
 
 ## 10. Cost accounting
 
 Price table in settings, USD per 1M tokens, marked approximate and overridable:
-Gemini Embedding 2 0.20; Gemini 2.5 Flash input 0.30, output 2.50. Embedding
-tokens are estimated (characters / 4) because the endpoint returns no usage for
-embeddings. The free tier bills nothing, so the README states both the
-list-price figure and that the actual spend was zero.
+embeddings 0.02; gpt-4.1-mini input 0.40, output 1.60. One eval run costs about
+USD 0.06 at these prices. The README states the per-question list-price figure
+and the actual total from the OpenAI usage dashboard.
 
 ## 11. Error handling
 
-- Provider 429/5xx (chat and embeddings): three retries, backoff 2 s, 4 s, 8 s; then the call fails
+- Provider 429/5xx: three retries, backoff 2 s, 4 s, 8 s; then the call fails
   and the caller reports it (eval marks the row, API returns 502).
 - Unreadable PDF or empty page: skip with a warning, continue.
 - JSON from the model: parse, validate shape, one retry, then refuse with
@@ -266,8 +263,8 @@ au-workplace-assistant/
   docs/design/
 ```
 
-Configuration (`.env`): `GEMINI_API_KEY`, `GEMINI_BASE_URL`, `CHAT_MODEL`,
-`EMBED_MODEL`, `DATABASE_URL`, `RAG_MIN_SIMILARITY`, `CHAT_MIN_INTERVAL_S`.
+Configuration (`.env`): `OPENAI_API_KEY`, `CHAT_MODEL`, `EMBED_MODEL`,
+`DATABASE_URL`, `RAG_MIN_SIMILARITY`.
 
 ## 14. Stage 2 hook
 

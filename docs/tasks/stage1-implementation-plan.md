@@ -1,6 +1,6 @@
 # Stage 1 implementation plan: Fair Work RAG assistant
 
-Design: [docs/design/2026-11-02-fairwork-rag-design.md](../docs/design/2026-11-02-fairwork-rag-design.md)
+Design: [docs/design/2026-11-02-fairwork-rag-design.md](../design/2026-11-02-fairwork-rag-design.md)
 Owner: Sam · Started: 2026-11-02 · Target: usable demo by 2026-11-03 evening
 Status: `plan` (move to `build` when phase 0 starts, `done` when phase 8 passes)
 
@@ -10,9 +10,10 @@ Claude Code doing the typing.
 
 ## Phase 0 · Scaffold (0.5 h)
 
-Files: `requirements.txt`, `pyproject.toml` (pytest config only), `.env.example`,
-`.gitignore` (`.env`, `data/raw/`, `evals/results/*.md` kept, `__pycache__`, `.venv`),
-`docker-compose.yml` (`pgvector/pgvector:pg16`, port 5433, user/db `rag`), `README.md` skeleton.
+Files: `requirements.txt`, `pyproject.toml` (pytest config only),
+`docker-compose.yml` (`pgvector/pgvector:pg16`, port 5433, user/db `rag`).
+Already in place: `.env.example`, `.gitignore` (`.env`, `data/raw/`; add `__pycache__`
+and `.venv`, keep `evals/results/*.md`), `README.md`, `README_CN.md`.
 
 Check:
 - [ ] `python -m venv .venv` and `pip install -r requirements.txt` finish clean
@@ -24,13 +25,13 @@ Files: `rag/__init__.py`, `rag/settings.py`, `rag/providers.py`.
 
 - `settings`: reads `.env`; defaults for every key listed in design §13; price table.
 - `providers.embed(texts)`: OpenAI embeddings in batches, returns vectors and token usage.
-- `providers.chat_json(system, user)`: Gemini via the OpenAI-compatible base URL,
-  `response_format` json_object, temperature 0, minimum interval between calls,
+- `providers.chat_json(system, user, schema)`: OpenAI `CHAT_MODEL` (default `gpt-4.1-mini`),
+  `response_format` strict `json_schema` built from `schema`, temperature 0,
   three retries with backoff on 429/5xx; returns parsed dict, usage, latency.
 
 Check:
 - [ ] `python -c "from rag.providers import embed; print(len(embed(['hi'])[0][0]))"` prints 1536
-- [ ] `python -c "from rag.providers import chat_json; print(chat_json('Reply as JSON {\"ok\": true}', 'go'))"` returns a dict with usage and latency
+- [ ] `python -c "from rag.providers import chat_json; print(chat_json('Reply with ok set to true.', 'go', {'type': 'object', 'properties': {'ok': {'type': 'boolean'}}, 'required': ['ok'], 'additionalProperties': False}))"` prints `{'ok': True}` with usage and latency
 
 ## Phase 2 · Chunking with tests (0.5 h)
 
@@ -107,22 +108,23 @@ Files: `evals/golden.yaml`, `rag/eval.py`, `evals/results/`.
   chosen value in the results file.
 
 Check:
-- [ ] `python -m rag.eval` completes within the free-tier rate limit (about 3 minutes)
+- [ ] `python -m rag.eval` completes in a couple of minutes and costs about USD 0.06 (33 chat calls, 18 embeddings)
 - [ ] hit@5 ≥ 80%, all three off-topic questions refused, mean faithfulness ≥ 4
 - [ ] the results table exists and is readable
 
 ## Phase 8 · README and final pass (0.5 h)
 
-Files: `README.md`.
+Files: `README.md`, `README_CN.md` (both already written ahead of the code).
 
-- What it is (two sentences), architecture diagram, run steps in order
-  (compose, venv, env, fetch, ingest, ask, api, eval), the latest results table,
-  design decisions with trade-offs (chunking, hybrid search, refusal threshold,
-  citations, evaluation), what production would need next, source attribution.
+- Paste the latest results table and the actual spend from the OpenAI usage
+  dashboard into both READMEs.
+- Check every command, module name and path in the READMEs against the real code
+  and fix whichever side is wrong.
 
 Check:
 - [ ] A fresh clone can follow the README top to bottom without reading the code
 - [ ] `pytest` green, `python -m rag.eval` reproduces the quoted table
+- [ ] README.md and README_CN.md say the same thing
 
 ## Commit points (Sam commits; nothing is committed on his behalf)
 
