@@ -19,9 +19,11 @@ on top of the same retrieval and answer modules.
 
 ### Non-goals for stage 1
 
-No web UI, no authentication, no multi-tenancy, no reranker, no caching, no
-conversation memory. These are listed in the README as "what production would
-need next".
+No authentication, no multi-tenancy, no reranker, no caching, no conversation
+memory. These are listed in the README as "what production would need next".
+A minimal demo page was added on 2026-11-03, see
+[2026-11-03-demo-page-design.md](2026-11-03-demo-page-design.md); a real front
+end stays out of scope.
 
 ## 2. Corpus
 
@@ -56,7 +58,7 @@ visible and testable.
 ```
 PDFs ──ingest──▶ chunks (text, embedding, tsvector) in PostgreSQL
 question ──embed──▶ vector top-20 ─┐
-question ──websearch_to_tsquery──▶ full-text top-20 ─┴─ RRF ──▶ top-5 chunks
+question ──OR of its words──▶ full-text top-20 ─┴─ RRF ──▶ top-5 chunks
 top-5 + question ──prompt──▶ chat model (JSON) ──validate citations / refuse──▶ answer
 every /ask ──▶ queries table (tokens, cost, latency)
 ```
@@ -70,7 +72,7 @@ All model access goes through one `openai` client with `OPENAI_API_KEY`:
 
 Both verified against the live API on 2026-11-02. OpenAI usage tier 1 (unlocked
 by the first USD 5) allows hundreds of requests per minute, far above this
-project's needs, so there is no pacing; calls retry 429/5xx three times with
+project's needs, so there is no pacing; the SDK retries 429/5xx three times with
 exponential backoff. API data is not used for training by default.
 
 ## 4. Components
@@ -79,14 +81,14 @@ One module, one job. Pure functions where possible so tests need no network.
 
 | Module | Responsibility | Interface |
 |---|---|---|
-| `rag/settings.py` | Load `.env`: `OPENAI_API_KEY`, model names, `DATABASE_URL`, chunk sizes, `RAG_MIN_SIMILARITY`, price table | `settings` object |
-| `rag/providers.py` | One `openai` client with retries; token usage returned with every call | `embed(texts) -> list[list[float]], usage` · `chat_json(system, user, schema) -> dict, usage, latency_ms` |
-| `rag/chunking.py` | Split page text into chunks of ~1800 characters with 200 overlap, breaking at paragraph or sentence boundaries when possible | `chunk_page(text) -> list[str]` (pure) |
-| `rag/db.py` | Connection, schema creation, inserts and the two search queries | `init_schema()`, `upsert_document()`, `insert_chunks()`, `vector_search()`, `text_search()`, `log_query()` |
+| `rag/settings.py` | Load `.env`: `OPENAI_API_KEY`, model names, `DATABASE_URL`, `RAG_MIN_SIMILARITY`; constants for chunk sizes and the price table; the corpus URL list | `settings` object · `CORPUS_URLS` |
+| `rag/providers.py` | One `openai` client; the SDK retries 429/5xx; token usage returned with every call; `data` is None when the model returns no usable JSON | `embed(texts) -> (vectors, tokens)` · `chat_json(system, user, schema) -> ChatReply(data, prompt_tokens, completion_tokens, latency_ms)` · `cost_usd(...)` |
+| `rag/chunking.py` | Tidy pypdf output; split page text into chunks of ~1800 characters with up to 200 overlap, breaking at paragraph or sentence boundaries when possible | `clean_text(text) -> str` · `chunk_page(text) -> list[str]` (pure) |
+| `rag/db.py` | Connection, schema creation, inserts and the two search queries | `connect()`, `init_schema()`, `upsert_document()`, `insert_chunks()`, `vector_search()`, `text_search()`, `log_query()` |
 | `rag/ingest.py` | Read PDFs with pypdf page by page, chunk, embed in batches of 64, store. Skips unreadable files with a warning. Re-running replaces a document's chunks | `python -m rag.ingest [data/raw]` |
-| `rag/retrieve.py` | Embed the question, run both searches, merge with reciprocal rank fusion (k = 60), return top-5 chunks plus the best cosine similarity | `retrieve(question) -> Retrieval(chunks, best_similarity)` · `rrf_merge(lists) -> ranked` (pure) |
-| `rag/answer.py` | Build the numbered-sources prompt, call chat, validate the JSON, apply refusal rules | `answer(question) -> Answer(text, citations, refused, usage, cost_usd, latency_ms)` · `validate_citations()` (pure) |
-| `rag/eval.py` | Run the golden set, compute metrics, write the results table | `python -m rag.eval` |
+| `rag/retrieve.py` | Embed the question, run both searches, merge with reciprocal rank fusion (k = 60), return top-5 chunks plus the best cosine similarity | `retrieve(question) -> Retrieval(chunks, best_similarity, embed_tokens)` · `rrf_merge(lists) -> ranked` (pure) |
+| `rag/answer.py` | Build the numbered-sources prompt, call chat, validate the JSON, apply refusal rules | `answer(question) -> Answer(text, citations, refused, error, sources, tokens, cost_usd, latency_ms)` · `validate_citations()` (pure) |
+| `rag/eval.py` | Run the golden set, compute metrics, write the results table; `--retrieval-only` skips the chat model | `python -m rag.eval [--retrieval-only]` |
 | `api.py` | FastAPI app: `POST /ask`, `GET /health` | HTTP |
 | `scripts/fetch_corpus.py` | Download the eleven PDFs, report any failure, never overwrite an existing file | CLI |
 
@@ -120,6 +122,7 @@ CREATE TABLE queries (
   asked_at      timestamptz NOT NULL DEFAULT now(),
   question      text NOT NULL,
   refused       boolean NOT NULL,
+  error         boolean NOT NULL DEFAULT false,  -- the model returned no usable JSON
   top_documents text[] NOT NULL,
   cited_chunks  int[] NOT NULL,
   prompt_tokens int, completion_tokens int, embed_tokens int,
@@ -128,16 +131,18 @@ CREATE TABLE queries (
 );
 ```
 
-`DATABASE_URL` defaults to `postgresql://rag:rag@localhost:5433/rag`; port 5433
-so it never collides with another local PostgreSQL on 5432.
+`DATABASE_URL` defaults to `postgresql://rag:rag@127.0.0.1:5433/rag`; port 5433
+so it never collides with another local PostgreSQL on 5432, and `127.0.0.1` because
+`localhost` tries IPv6 first on Windows and stalls against Docker's IPv4-only port.
 
 ## 6. Retrieval
 
 1. Embed the question (one OpenAI call).
 2. Vector search: `ORDER BY embedding <=> $q LIMIT 20`, returning cosine
    similarity as `1 - distance`.
-3. Full-text search: `WHERE tsv @@ websearch_to_tsquery('english', $q)` ordered
-   by `ts_rank_cd`, limit 20.
+3. Full-text search: the question's stemmed words from `plainto_tsquery('english', $q)`
+   joined with OR (AND would require every word of the question in one chunk),
+   ordered by `ts_rank_cd`, limit 20.
 4. Reciprocal rank fusion: `score(chunk) = Σ 1 / (60 + rank_in_list)` over the
    two lists; take the top 5.
 5. `best_similarity` is the highest cosine similarity among the vector results
@@ -161,8 +166,9 @@ Refuse (reply "The documents I have do not cover this.") when any of:
 
 - `best_similarity < RAG_MIN_SIMILARITY` (default 0.30; tuned on the golden set);
 - the model returns no valid citation numbers;
-- the JSON cannot be parsed after one retry with a stricter instruction (the
-  response is also flagged `error=true` in the log).
+- the model returns no usable JSON (with a strict schema only a safety refusal or a
+  cut-off reply can cause this, so there is no retry; the query is flagged
+  `error=true` in the log).
 
 The similarity check runs before the model is called, so off-topic questions
 cost no chat tokens. Citations outside `1..5` are dropped; if none remain, the
@@ -182,6 +188,9 @@ Each kept citation is returned as document name, page and the chunk text.
   "cost_usd": 0.000312
 }
 ```
+
+The demo page added `confidence`, `sources` and `rank` on citations to this
+response; they are specified in the demo-page design.
 
 `GET /health` checks the database connection. Every `/ask` is logged to
 `queries`. Errors: database down → 503; provider failure after retries → 502
@@ -217,20 +226,25 @@ Results go to `evals/results/<UTC timestamp>.md` as a table; the README quotes
 the latest run. The judge prompt lives in `rag/eval.py` and the judge uses the
 same chat client.
 
+`python -m rag.eval --retrieval-only` runs retrieval alone (hit@5 and the best
+similarity per question, embedding cost only) for tuning chunking and the
+threshold before paying for a full run.
+
 ## 10. Cost accounting
 
 Price table in settings, USD per 1M tokens, marked approximate and overridable:
-embeddings 0.02; gpt-4.1-mini input 0.40, output 1.60. One eval run costs about
-USD 0.06 at these prices. The README states the per-question list-price figure
+embeddings 0.02; gpt-4.1-mini input 0.40, output 1.60. The first full eval run
+cost USD 0.029 at these prices. The README states the per-question list-price figure
 and the actual total from the OpenAI usage dashboard.
 
 ## 11. Error handling
 
-- Provider 429/5xx: three retries, backoff 2 s, 4 s, 8 s; then the call fails
-  and the caller reports it (eval marks the row, API returns 502).
+- Provider 429/5xx: the OpenAI SDK retries three times with exponential backoff
+  (honouring Retry-After); then the call fails and the caller reports it (the
+  eval run stops, the API returns 502).
 - Unreadable PDF or empty page: skip with a warning, continue.
-- JSON from the model: parse, validate shape, one retry, then refuse with
-  `error=true`.
+- JSON from the model: the strict schema guarantees the shape; if the reply is
+  still unusable (safety refusal, cut-off), refuse with `error=true`, no retry.
 - Secrets only in `.env` (git-ignored); `.env.example` documents the keys.
 
 ## 12. Testing
@@ -242,7 +256,8 @@ and the actual total from the OpenAI usage dashboard.
 - `rrf_merge`: a chunk present in both lists outranks one present in only one;
   ties keep input order.
 - `validate_citations` and the refusal rule: out-of-range numbers dropped,
-  empty citations refuse, low similarity refuses.
+  empty citations refuse, low similarity refuses (tested through `answer()` with
+  fakes; a fixture blocks real OpenAI calls).
 
 Acceptance for stage 1: eleven documents ingest and report chunk counts; the
 golden set meets the targets above; `/ask` returns page-level citations.

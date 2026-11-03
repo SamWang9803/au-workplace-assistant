@@ -20,8 +20,9 @@
 
 ### 第一阶段不做的事
 
-不做 Web 界面、不做鉴权、不做多租户、不做重排（reranker）、不做缓存、不做对话记忆。
-这些会在 README 里列为「上生产还需要补的东西」。
+不做鉴权、不做多租户、不做重排（reranker）、不做缓存、不做对话记忆。
+这些会在 README 里列为「上生产还需要补的东西」。2026-11-03 加了一个最简演示页，见
+[2026-11-03-demo-page-design.zh.md](2026-11-03-demo-page-design.zh.md)；真正的前端仍不在范围内。
 
 ## 2. 语料
 
@@ -55,7 +56,7 @@
 ```
 PDF ──入库(ingest)──▶ chunks（text、embedding、tsvector）存入 PostgreSQL
 问题 ──embed──▶ 向量检索 top-20 ─┐
-问题 ──websearch_to_tsquery──▶ 全文检索 top-20 ─┴─ RRF ──▶ top-5 chunks
+问题 ──问题词 OR 匹配──▶ 全文检索 top-20 ─┴─ RRF ──▶ top-5 chunks
 top-5 + 问题 ──prompt──▶ 对话模型（JSON）──校验引用 / 拒答──▶ 回答
 每次 /ask ──▶ queries 表（token 数、费用、延迟）
 ```
@@ -68,7 +69,7 @@ top-5 + 问题 ──prompt──▶ 对话模型（JSON）──校验引用 / 
 | 向量嵌入 | `text-embedding-3-small`，1536 维 |
 
 两者都已于 2026-11-02 对真实 API 实测通过。OpenAI 用量等级 1（首次充 5 美元即解锁）
-每分钟允许几百次请求，远超本项目所需，所以不做节流；调用遇到 429/5xx 按指数退避
+每分钟允许几百次请求，远超本项目所需，所以不做节流；遇到 429/5xx 由 SDK 按指数退避
 重试三次。API 数据默认不用于训练。
 
 ## 4. 组件
@@ -77,14 +78,14 @@ top-5 + 问题 ──prompt──▶ 对话模型（JSON）──校验引用 / 
 
 | 模块 | 职责 | 接口 |
 |---|---|---|
-| `rag/settings.py` | 读 `.env`：`OPENAI_API_KEY`、模型名、`DATABASE_URL`、分块大小、`RAG_MIN_SIMILARITY`、价格表 | `settings` 对象 |
-| `rag/providers.py` | 一个 `openai` 客户端，带重试；每次调用都返回 token 用量 | `embed(texts) -> list[list[float]], usage` · `chat_json(system, user, schema) -> dict, usage, latency_ms` |
-| `rag/chunking.py` | 把一页文本切成约 1800 字符、重叠 200 字符的块，尽量在段落或句子边界断开 | `chunk_page(text) -> list[str]`（纯函数） |
-| `rag/db.py` | 连接、建表、写入，以及两种检索查询 | `init_schema()`、`upsert_document()`、`insert_chunks()`、`vector_search()`、`text_search()`、`log_query()` |
+| `rag/settings.py` | 读 `.env`：`OPENAI_API_KEY`、模型名、`DATABASE_URL`、`RAG_MIN_SIMILARITY`；分块大小和价格表是常量；语料下载地址清单 | `settings` 对象 · `CORPUS_URLS` |
+| `rag/providers.py` | 一个 `openai` 客户端，429/5xx 由 SDK 重试；每次调用都返回 token 用量；模型没给出可用 JSON 时 `data` 为 None | `embed(texts) -> (vectors, tokens)` · `chat_json(system, user, schema) -> ChatReply(data, prompt_tokens, completion_tokens, latency_ms)` · `cost_usd(...)` |
+| `rag/chunking.py` | 清理 pypdf 抽出的文本；把一页文本切成约 1800 字符、最多重叠 200 字符的块，尽量在段落或句子边界断开 | `clean_text(text) -> str` · `chunk_page(text) -> list[str]`（纯函数） |
+| `rag/db.py` | 连接、建表、写入，以及两种检索查询 | `connect()`、`init_schema()`、`upsert_document()`、`insert_chunks()`、`vector_search()`、`text_search()`、`log_query()` |
 | `rag/ingest.py` | 用 pypdf 逐页读 PDF，分块，按每批 64 条做嵌入，存库。读不了的文件打警告跳过。重跑会替换该文档的全部分块 | `python -m rag.ingest [data/raw]` |
-| `rag/retrieve.py` | 把问题做嵌入，跑两种检索，用 reciprocal rank fusion（k = 60）合并，返回 top-5 分块和最高余弦相似度 | `retrieve(question) -> Retrieval(chunks, best_similarity)` · `rrf_merge(lists) -> ranked`（纯函数） |
-| `rag/answer.py` | 拼带编号来源的 prompt，调对话模型，校验 JSON，套用拒答规则 | `answer(question) -> Answer(text, citations, refused, usage, cost_usd, latency_ms)` · `validate_citations()`（纯函数） |
-| `rag/eval.py` | 跑黄金测试集，算指标，写结果表 | `python -m rag.eval` |
+| `rag/retrieve.py` | 把问题做嵌入，跑两种检索，用 reciprocal rank fusion（k = 60）合并，返回 top-5 分块和最高余弦相似度 | `retrieve(question) -> Retrieval(chunks, best_similarity, embed_tokens)` · `rrf_merge(lists) -> ranked`（纯函数） |
+| `rag/answer.py` | 拼带编号来源的 prompt，调对话模型，校验 JSON，套用拒答规则 | `answer(question) -> Answer(text, citations, refused, error, sources, tokens, cost_usd, latency_ms)` · `validate_citations()`（纯函数） |
+| `rag/eval.py` | 跑黄金测试集，算指标，写结果表；`--retrieval-only` 时不调对话模型 | `python -m rag.eval [--retrieval-only]` |
 | `api.py` | FastAPI 应用：`POST /ask`、`GET /health` | HTTP |
 | `scripts/fetch_corpus.py` | 下载十一份 PDF，报告失败项，绝不覆盖已有文件 | 命令行 |
 
@@ -118,6 +119,7 @@ CREATE TABLE queries (
   asked_at      timestamptz NOT NULL DEFAULT now(),
   question      text NOT NULL,
   refused       boolean NOT NULL,
+  error         boolean NOT NULL DEFAULT false,  -- 模型没有返回可用的 JSON
   top_documents text[] NOT NULL,
   cited_chunks  int[] NOT NULL,
   prompt_tokens int, completion_tokens int, embed_tokens int,
@@ -126,16 +128,17 @@ CREATE TABLE queries (
 );
 ```
 
-`DATABASE_URL` 默认是 `postgresql://rag:rag@localhost:5433/rag`；用 5433 端口，
-是为了不和本机 5432 上可能已有的 PostgreSQL 撞车。
+`DATABASE_URL` 默认是 `postgresql://rag:rag@127.0.0.1:5433/rag`；用 5433 端口，
+是为了不和本机 5432 上可能已有的 PostgreSQL 撞车；写 `127.0.0.1` 而不是 `localhost`，
+是因为 Windows 上 `localhost` 先试 IPv6，而 Docker 只在 IPv4 上监听，连接会卡住。
 
 ## 6. 检索
 
 1. 把问题做嵌入（一次 OpenAI 调用）。
 2. 向量检索：`ORDER BY embedding <=> $q LIMIT 20`，余弦相似度按 `1 - distance`
    返回。
-3. 全文检索：`WHERE tsv @@ websearch_to_tsquery('english', $q)`，按 `ts_rank_cd`
-   排序，取 20 条。
+3. 全文检索：用 `plainto_tsquery('english', $q)` 取出问题的词干，再用 OR 连接
+   （用 AND 会要求问题的每个词都出现在同一个分块里），按 `ts_rank_cd` 排序，取 20 条。
 4. Reciprocal rank fusion：对两个列表求 `score(chunk) = Σ 1 / (60 + rank_in_list)`，
    取前 5。
 5. `best_similarity` 是向量检索结果里的最高余弦相似度，供拒答规则使用。结果为空
@@ -155,8 +158,8 @@ CREATE TABLE queries (
 
 - `best_similarity < RAG_MIN_SIMILARITY`（默认 0.30；在黄金测试集上调出来的）；
 - 模型没有返回任何有效的引用编号；
-- JSON 解析失败，且用更严格的指令重试一次后仍失败（这条响应同时在日志里标
-  `error=true`）。
+- 模型没有返回可用的 JSON（有严格 schema 时只有安全拒答或回复被截断会导致这种
+  情况，重试无用，所以不重试；这条查询在日志里标 `error=true`）。
 
 相似度检查在调用模型之前进行，所以跑题问题不花对话 token。不在 `1..5` 范围内的
 引用编号会被丢弃；一个都不剩就拒答。保留下来的每条引用，
@@ -175,6 +178,8 @@ CREATE TABLE queries (
   "cost_usd": 0.000312
 }
 ```
+
+演示页给这个响应加了 `confidence`、`sources` 和引用上的 `rank`，细节见演示页设计稿。
 
 `GET /health` 检查数据库连接。每次 `/ask` 都记进 `queries` 表。错误码：数据库挂了
 → 503；模型服务重试后仍失败 → 502，附一句简短说明；请求校验不过 → 422。
@@ -208,18 +213,22 @@ CREATE TABLE queries (
 结果以表格形式写到 `evals/results/<UTC 时间戳>.md`；README 引用最近一次的结果。
 评判用的 prompt 放在 `rag/eval.py` 里，评判模型走同一个对话客户端。
 
+`python -m rag.eval --retrieval-only` 只跑检索（每题的 hit@5 和最高相似度，只花嵌入的钱），
+用来在花钱跑完整评测之前调分块和阈值。
+
 ## 10. 费用核算
 
 价格表放在 settings 里，单位是每百万 token 的美元数，注明是近似值、可覆盖：
-嵌入 0.02；gpt-4.1-mini 输入 0.40、输出 1.60。按这个价，评测跑一轮约 0.06 美元。
+嵌入 0.02；gpt-4.1-mini 输入 0.40、输出 1.60。按这个价，第一次完整评测实际花了 0.029 美元。
 README 写明按标价算的每题费用，以及从 OpenAI 用量面板抄录的实际总花费。
 
 ## 11. 错误处理
 
-- 模型服务 429/5xx：重试三次，退避 2 秒、4 秒、8 秒；之后调用失败，由调用方报告
-  （评测标记该行，API 返回 502）。
+- 模型服务 429/5xx：由 OpenAI SDK 按指数退避重试三次（遵守 Retry-After）；之后调用
+  失败，由调用方报告（评测运行中止，API 返回 502）。
 - PDF 读不了或页面为空：打警告跳过，继续。
-- 模型返回的 JSON：解析、校验结构、重试一次，仍不行就拒答并标 `error=true`。
+- 模型返回的 JSON：严格 schema 保证结构；仍不可用时（安全拒答、被截断）直接拒答并标
+  `error=true`，不重试。
 - 密钥只放在 `.env`（已 git-ignore）；`.env.example` 说明需要哪些键。
 
 ## 12. 测试
@@ -230,7 +239,7 @@ README 写明按标价算的每题费用，以及从 OpenAI 用量面板抄录�
 - `rrf_merge`：两个列表里都出现的分块，排名高于只在一个列表里出现的；并列时保持
   输入顺序。
 - `validate_citations` 和拒答规则：越界编号被丢弃，引用为空则拒答，相似度过低则
-  拒答。
+  拒答（通过 `answer()` 配合假的检索和模型来测；测试夹具会拦下真实的 OpenAI 调用）。
 
 第一阶段的验收标准：十一份文档都能入库并报出分块数；黄金测试集达到上面的目标；
 `/ask` 返回精确到页的引用。
