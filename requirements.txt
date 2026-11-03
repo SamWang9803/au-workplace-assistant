@@ -1,0 +1,9 @@
+openai==3.42.1
+psycopg[binary]==3.3.6
+pypdf==6.21.4
+fastapi==0.162.0
+uvicorn==0.54.0
+python-dotenv==1.2.4
+PyYAML==6.0.3
+pytest==9.2.0
+httpx==0.28.1                # only for tests: FastAPI TestClient
