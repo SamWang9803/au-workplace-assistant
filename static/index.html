@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>au-workplace-assistant</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1f2328; --muted: #656d76; --line: #d0d7de;
+    --accent: #0969da; --chip: #eef1f4;
+    --ok-bg: #dafbe1; --ok-text: #116329; --warn-bg: #fff8c5; --warn-text: #7d4e00;
+    --err-bg: #ffebe9; --err-text: #a40e26;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --card: #161b22; --text: #e6edf3; --muted: #8b949e; --line: #30363d;
+      --accent: #58a6ff; --chip: #21262d;
+      --ok-bg: #12351f; --ok-text: #7ee787; --warn-bg: #3a2d05; --warn-text: #e3b341;
+      --err-bg: #3c1215; --err-text: #ff7b72;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 840px; margin: 0 auto; padding: 32px 16px 64px; }
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  .docs-link { font-size: 14px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--chip); color: var(--text); text-decoration: none; white-space: nowrap; }
+  .docs-link:hover { border-color: var(--accent); color: var(--accent); }
+  .lede { color: var(--muted); margin: 0 0 24px; }
+  form { display: flex; gap: 8px; }
+  input[type=text] { flex: 1; min-width: 0; font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); }
+  input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { font: inherit; border: 0; border-radius: 8px; cursor: pointer; }
+  #ask { padding: 10px 20px; background: var(--accent); color: #fff; font-weight: 600; }
+  #ask:disabled { opacity: .6; cursor: default; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 28px; }
+  .chip { font-size: 14px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--chip); color: var(--text); }
+  .chip:hover { border-color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 12px; }
+  .status { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; color: var(--muted); font-size: 14px; margin-bottom: 12px; }
+  .badge { font-weight: 600; font-size: 14px; padding: 3px 10px; border-radius: 999px; }
+  .badge.ok { background: var(--ok-bg); color: var(--ok-text); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn-text); }
+  .answer { font-size: 18px; margin: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 24px 0 10px; }
+  .cite .head { font-weight: 600; margin-bottom: 6px; }
+  .cite .num { color: var(--accent); margin-right: 6px; }
+  .cite .where { color: var(--muted); font-weight: 400; }
+  .snippet { white-space: pre-wrap; font-size: 14px; margin: 0; }
+  .more { font-size: 13px; background: none; color: var(--accent); padding: 0; margin-top: 6px; }
+  details summary { cursor: pointer; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 10px; }
+  th, td { text-align: left; padding: 6px 8px; border-top: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; border-top: 0; }
+  .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .cited-mark { color: var(--ok-text); font-weight: 600; white-space: nowrap; }
+  .error { background: var(--err-bg); color: var(--err-text); border-color: transparent; }
+  .hidden { display: none; }
+  footer { color: var(--muted); font-size: 13px; margin-top: 32px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <h1>au-workplace-assistant</h1>
+    <a class="docs-link" href="/docs" target="_blank" rel="noopener">API docs ↗</a>
+  </div>
+  <p class="lede">Answers only from eleven Fair Work Ombudsman fact sheets, with page citations. Refuses when the documents do not cover the question.</p>
+
+  <form id="form">
+    <input id="question" type="text" maxlength="1000" placeholder="Ask about leave, hours, notice, pay slips…" autocomplete="off" required>
+    <button id="ask" type="submit">Ask</button>
+  </form>
+  <div id="chips" class="chips"></div>
+
+  <section id="result" class="hidden">
+    <div id="error" class="card error hidden"></div>
+    <div id="answer-card" class="card hidden">
+      <div id="status" class="status"></div>
+      <p id="answer" class="answer"></p>
+    </div>
+    <div id="citations-block" class="hidden">
+      <h2>Cited sources</h2>
+      <div id="citations"></div>
+    </div>
+    <details id="sources-block" class="card hidden">
+      <summary>Retrieved sources (top 5 after fusion)</summary>
+      <table>
+        <thead><tr><th>#</th><th>Document</th><th>Page</th><th>Similarity</th><th></th></tr></thead>
+        <tbody id="sources"></tbody>
+      </table>
+    </details>
+  </section>
+
+  <footer>Not legal advice. Source material © Commonwealth of Australia (Fair Work Ombudsman).</footer>
+</main>
+
+<script>
+  const EXAMPLES = [
+    "How much notice does an employer have to give?",
+    "Can my boss make me work on Christmas Day?",
+    "What percentage of my salary must my employer pay into super?",
+    "How much redundancy pay do I get after 5 years?",
+    "How do I apply for a 482 visa?",
+  ];
+  const ERRORS = {
+    422: "The question must be between 1 and 1000 characters.",
+    502: "The model provider failed after retries. Try again in a moment.",
+    503: "The database is unavailable. Is the Docker container running?",
+  };
+  const SNIPPET_LIMIT = 300;
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+
+  for (const example of EXAMPLES) {
+    const chip = el("button", "chip", example);
+    chip.type = "button";
+    chip.addEventListener("click", () => { $("question").value = example; $("question").focus(); });
+    $("chips").appendChild(chip);
+  }
+
+  $("form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const question = $("question").value.trim();
+    if (!question) return;
+    setLoading(true);
+    try {
+      const response = await fetch("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      });
+      if (!response.ok) {
+        showError(ERRORS[response.status] || `Request failed with status ${response.status}.`);
+        return;
+      }
+      render(await response.json());
+    } catch (err) {
+      showError("Could not reach the server. Is `uvicorn api:app` running?");
+    } finally {
+      setLoading(false);
+    }
+  });
+
+  function setLoading(on) {
+    $("ask").disabled = on;
+    $("ask").textContent = on ? "Asking…" : "Ask";
+  }
+
+  function showError(message) {
+    $("result").classList.remove("hidden");
+    $("answer-card").classList.add("hidden");
+    $("citations-block").classList.add("hidden");
+    $("sources-block").classList.add("hidden");
+    $("error").textContent = message;
+    $("error").classList.remove("hidden");
+  }
+
+  function render(data) {
+    $("result").classList.remove("hidden");
+    $("error").classList.add("hidden");
+
+    const status = $("status");
+    status.replaceChildren();
+    status.appendChild(el("span", data.refused ? "badge warn" : "badge ok", data.refused ? "Refused" : "Answered"));
+    if (data.confidence) status.appendChild(el("span", null, `confidence ${data.confidence}`));
+    status.appendChild(el("span", "num", `${(data.latency_ms / 1000).toFixed(1)} s`));
+    status.appendChild(el("span", "num", `$${data.cost_usd.toFixed(4)}`));
+    $("answer").textContent = data.answer;
+    $("answer-card").classList.remove("hidden");
+
+    const citations = $("citations");
+    citations.replaceChildren();
+    for (const c of data.citations) {
+      const card = el("div", "card cite");
+      const head = el("div", "head");
+      head.appendChild(el("span", "num", `[${c.rank}]`));
+      head.appendChild(el("span", null, c.document));
+      head.appendChild(el("span", "where", ` · page ${c.page}`));
+      card.appendChild(head);
+      card.appendChild(snippet(c.snippet));
+      citations.appendChild(card);
+    }
+    $("citations-block").classList.toggle("hidden", data.citations.length === 0);
+
+    const rows = $("sources");
+    rows.replaceChildren();
+    for (const s of data.sources) {
+      const row = el("tr");
+      row.appendChild(el("td", "num", String(s.rank)));
+      row.appendChild(el("td", null, s.document));
+      row.appendChild(el("td", "num", String(s.page)));
+      row.appendChild(el("td", "num", s.similarity === null ? "text only" : s.similarity.toFixed(3)));
+      row.appendChild(el("td", s.cited ? "cited-mark" : null, s.cited ? "✓ cited" : ""));
+      rows.appendChild(row);
+    }
+    $("sources-block").classList.toggle("hidden", data.sources.length === 0);
+    $("sources-block").open = false;
+  }
+
+  function snippet(text) {
+    const wrapper = el("div");
+    const body = el("p", "snippet");
+    wrapper.appendChild(body);
+    if (text.length <= SNIPPET_LIMIT) {
+      body.textContent = text;
+      return wrapper;
+    }
+    let expanded = false;
+    const toggle = el("button", "more");
+    toggle.type = "button";
+    const draw = () => {
+      body.textContent = expanded ? text : text.slice(0, SNIPPET_LIMIT) + "…";
+      toggle.textContent = expanded ? "Show less" : "Show more";
+    };
+    toggle.addEventListener("click", () => { expanded = !expanded; draw(); });
+    draw();
+    wrapper.appendChild(toggle);
+    return wrapper;
+  }
+</script>
+</body>
+</html>

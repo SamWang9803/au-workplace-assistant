@@ -1,0 +1,94 @@
+# Golden set for `python -m rag.eval`: fifteen answerable questions across the eleven
+# fact sheets and three off-topic questions that must be refused (expected_doc: null).
+# expected_doc is the PDF file name without its extension. Each question targets content
+# that only its expected document contains, so hit@5 is unambiguous.
+#
+# Gold answers were checked against the PDFs downloaded on 2026-11-02. The fact sheets
+# change over time (minimum wages every 1 July), so re-check them after re-downloading.
+
+- id: nes-what-are-they
+  question: What are the National Employment Standards?
+  expected_doc: Introduction-to-the-national-employment-standards
+  gold_answer: Minimum employment entitlements that have to be provided to all employees in the national workplace relations system; some rules and exclusions apply.
+
+- id: max-hours-full-time
+  question: How many hours a week can a full-time employee be required to work?
+  expected_doc: Maximum-weekly-hours
+  gold_answer: 38 hours a week, unless their award or enterprise agreement specifies different hours; an employer can request or require additional hours only if they are reasonable.
+
+- id: max-hours-reasonable
+  question: What is taken into account when deciding whether extra hours are reasonable?
+  expected_doc: Maximum-weekly-hours
+  gold_answer: Risk to health and safety, the employee's personal circumstances including family responsibilities, the needs of the workplace, whether the employee gets overtime, penalty rates or other compensation, notice given by the employer or by the employee, the usual patterns of work in the industry, the nature of the role and level of responsibility, and any averaging arrangements.
+
+- id: annual-leave-weeks
+  question: How many weeks of paid annual leave does a full-time employee get each year?
+  expected_doc: Annual-leave
+  gold_answer: 4 weeks of paid annual leave for each year of service (casual employees excluded); shiftworkers can be entitled to 5 weeks.
+
+- id: annual-leave-termination
+  question: What happens to unused annual leave when employment ends?
+  expected_doc: Annual-leave
+  gold_answer: The employer must pay the employee for any untaken annual leave, at what they would have been paid if they had taken it, including annual leave loading if it applied during employment.
+
+- id: public-holiday-work-request
+  question: Can my employer ask me to work on a public holiday?
+  expected_doc: Public-holidays
+  gold_answer: Employees have the right to be absent on a public holiday, but an employer can request work; whether the request, or the employee's refusal, is reasonable depends on factors such as the workplace's operational needs, the employee's personal circumstances, penalty rates and the notice given.
+
+- id: notice-four-years
+  question: How much notice of termination must an employer give an employee with 4 years of continuous service?
+  expected_doc: Notice-of-termination-and-redundancy-pay
+  gold_answer: 3 weeks (more than 3 years up to 5 years of service), plus an additional week if the employee is over 45 and has completed at least 2 years of service.
+
+- id: redundancy-five-years
+  question: How much redundancy pay is an employee with 5 years of continuous service entitled to?
+  expected_doc: Notice-of-termination-and-redundancy-pay
+  gold_answer: 10 weeks' pay, for at least 5 but less than 6 years of continuous service.
+
+- id: minimum-wage-amount
+  question: What is the National Minimum Wage from 1 July 2026?
+  expected_doc: Minimum-wages
+  gold_answer: $26.44 per hour or $1004.90 per week before tax.
+
+- id: long-service-leave-source
+  question: Where does an employee's long service leave entitlement come from under the NES?
+  expected_doc: Long-service-leave
+  gold_answer: From their applicable pre-modernised award; if no pre-modernised award applies, from the applicable State or Territory long service leave laws.
+
+- id: jury-service-pay
+  question: Does an employee get paid while doing jury service?
+  expected_doc: Community-service-leave
+  gold_answer: Employees other than casuals get make-up pay for the first 10 days of jury duty, which is the difference between jury duty pay and their base pay rate for the ordinary hours they would have worked.
+
+- id: unpaid-trial
+  question: Is it legal to ask someone to do an unpaid work trial?
+  expected_doc: Unpaid-work
+  gold_answer: A short trial can be unpaid only if it is necessary to see the person's skills for the job, shows only skills related to the job, lasts only as long as needed (usually an hour up to a shift) and is directly supervised the whole time; otherwise the person must be paid the correct minimum rate.
+
+- id: record-keeping-years
+  question: How long must employers keep employee records?
+  expected_doc: Record-keeping-and-pay-slips
+  gold_answer: 7 years.
+
+- id: fwis-when
+  question: When must an employer give a new employee the Fair Work Information Statement?
+  expected_doc: Fair-Work-Information-Statement
+  gold_answer: When the new employee starts work.
+
+- id: casual-information-statement
+  question: When must casual employees be given the Casual Employment Information Statement?
+  expected_doc: Fair-Work-Information-Statement
+  gold_answer: Before, or as soon as possible after, the start of employment, and at set times throughout their employment.
+
+- id: off-topic-visa
+  question: How do I apply for a 482 visa?
+  expected_doc: null
+
+- id: off-topic-capital-gains
+  question: What is the capital gains tax discount on shares held for more than 12 months?
+  expected_doc: null
+
+- id: off-topic-business-name
+  question: How do I register a business name?
+  expected_doc: null
